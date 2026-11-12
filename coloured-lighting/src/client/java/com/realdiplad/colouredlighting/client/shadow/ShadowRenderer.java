@@ -45,7 +45,7 @@ public final class ShadowRenderer {
 		RenderSystem.defaultBlendFunc();
 		RenderSystem.disableCull();
 		RenderSystem.enableDepthTest();
-		RenderSystem.setShader(GameRenderer::getPositionColorShader);
+		RenderSystem.setShader(GameRenderer::getPositionColorProgram);
 
 		BufferBuilder buffer = Tessellator.getInstance().getBuffer();
 		buffer.begin(VertexFormat.DrawMode.QUADS, VertexFormats.POSITION_COLOR);
