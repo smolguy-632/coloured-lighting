@@ -17,6 +17,8 @@ import net.minecraft.client.world.ClientWorld;
  *   <li>the quantized sun-angle bucket advances - the same ticks on which
  *       vanilla refreshes sky light across all chunks.</li>
  * </ul>
+ * After sundown the sun sweep is replaced by torch-light shadows: rays are
+ * marched from every nearby light source and blocked cells draw a shadow.
  * A small per-tick budget keeps the cost spread out; remeshed chunks are
  * serviced first so block edits feel instant.
  */
@@ -64,12 +66,14 @@ public final class ShadowManager {
 
 	public void onChunkUnload(int chunkX, int chunkZ) {
 		if (chunks.remove(pack(chunkX, chunkZ)) != null) {
+			SunShadowMap.dropLights(chunkX, chunkZ);
 			refreshRenderList();
 		}
 	}
 
 	public void clear() {
 		chunks.clear();
+		SunShadowMap.clearLights();
 		refreshRenderList();
 	}
 
@@ -88,12 +92,11 @@ public final class ShadowManager {
 		int bucket = currentBucket(skyAngle);
 
 		double angle = skyAngle * Math.PI * 2.0;
-		double sunHeight = Math.cos(angle);
-		double sunAcross = Math.sin(angle);
-		// Night: the moon mirrors the sun, so shadows continue faintly.
-		boolean night = sunHeight < 0.05;
-		double towardX = night ? sunAcross : -sunAcross;
-		double towardY = night ? -sunHeight : sunHeight;
+		// At night the sun terms are unused - torch light takes over - but the
+		// direction convention is kept so the day path stays identical.
+		boolean night = Math.cos(angle) < 0.05;
+		double towardX = -Math.sin(angle);
+		double towardY = Math.cos(angle);
 
 		int budget = BUDGET_PER_TICK;
 		boolean changed = false;
