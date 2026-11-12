@@ -1,14 +1,18 @@
 package com.realdiplad.colouredlighting.client.shadow;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import net.minecraft.block.BlockState;
 import net.minecraft.block.LeavesBlock;
+import net.minecraft.block.PaneBlock;
+import net.minecraft.block.TransparentBlock;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.world.BlockView;
 import net.minecraft.world.Heightmap;
 import net.minecraft.world.chunk.WorldChunk;
 
@@ -21,22 +25,26 @@ import net.minecraft.world.chunk.WorldChunk;
  * because the sweep reads heightmaps of the chunks lying toward the sun,
  * shadows stretch across the whole render distance with no radius limit.
  *
- * At night the light comes from torches, lanterns and the like: for every
- * surface cell near a light source the straight ray from the light is marched,
- * and cells whose rays are blocked by terrain draw a shadow whose strength
- * falls off with distance - so a log next to a torch throws a dark wedge away
- * from it.
+ * Floating casters (air underneath, e.g. a plank stuck on a wall) are handled
+ * as bands: they only block rays crossing their own height range, so the
+ * ground under and beside them stays lit and their shadow starts further out.
  *
- * A column can expose several surfaces: the heightmap top plus interior floors
- * under overhangs (doorways, porches, glass roofs) within a small depth, so
- * those stay shadowed too.
+ * At night the light comes from torches, lanterns and the like: for every
+ * surface cell near a light source an exact voxel ray is marched from the
+ * light, and cells whose rays are blocked by terrain draw a shadow whose
+ * strength falls off with distance.
+ *
+ * Finally every shadow is softened toward lit neighbours: light bounces off
+ * lit ground back into the edges of shadows, so they fade out instead of
+ * ending in a hard line.
  *
  * Columns are classified by their topmost block:
  * <ul>
- *   <li>opaque blocks block light fully;</li>
- *   <li>leaves cast translucent sun shadows (light filters through);</li>
- *   <li>glass and other see-through blocks cast nothing - the sweep looks
- *       below them to the first solid block.</li>
+ *   <li>full opaque blocks, and partial ones (slabs, stairs, fences, walls...)
+ *       all block light fully;</li>
+ *   <li>leaves cast translucent shadows (light filters through);</li>
+ *   <li>glass and panes cast nothing - the sweep looks below them to the
+ *       first solid block.</li>
  * </ul>
  * Columns whose top block is a light source (torch, lantern...) count as one
  * block taller so they cast their own sun shadow by day.
@@ -115,11 +123,15 @@ public final class SunShadowMap {
 		}
 
 		// Per column: up to MAX_SURFACES surface heights, plus the caster height
-		// and tier of the topmost shadow-casting block.
+		// and tier of the topmost shadow-casting block. Floating casters (air
+		// below) are kept separate: they only block rays passing through their
+		// own height band, not everything below them.
 		int[] surfaces = new int[size * size * MAX_SURFACES];
 		int[] counts = new int[size * size];
 		int[] caster = new int[size * size];
 		int[] tier = new int[size * size];
+		boolean[] floating = new boolean[size * size];
+		int[] fbottom = new int[size * size];
 		List<LightPos> lights = new ArrayList<>();
 		BlockPos.Mutable cursor = new BlockPos.Mutable();
 		for (int gx = 0; gx < size; gx++) {
@@ -132,17 +144,32 @@ public final class SunShadowMap {
 				// Caster: the first block from the top that actually blocks light.
 				int cy = topBlock;
 				BlockState state = world.getBlockState(cursor.set(x, cy, z));
-				int t = tierOf(state);
+				int t = tierOf(state, world, cursor);
 				while (t == TIER_CLEAR && cy > bottomY) {
 					cy--;
 					state = world.getBlockState(cursor.set(x, cy, z));
-					t = tierOf(state);
+					t = tierOf(state, world, cursor);
 				}
 				if (t == TIER_CLEAR) {
 					continue; // nothing solid anywhere in the column
 				}
-				caster[index] = cy + 1;
-				tier[index] = t;
+				if (tierOf(world.getBlockState(cursor.set(x, cy - 1, z)), world, cursor) == TIER_OPAQUE) {
+					// Grounded: solid below, blocks everything under its top.
+					caster[index] = cy + 1;
+					tier[index] = t;
+				} else {
+					// Floating: walk down to its real bottom; it only blocks
+					// rays crossing its own band.
+					int by = cy;
+					while (by > bottomY && cy - by < MAX_DIG
+							&& tierOf(world.getBlockState(cursor.set(x, by - 1, z)), world, cursor) == TIER_OPAQUE) {
+						by--;
+					}
+					floating[index] = true;
+					fbottom[index] = by;
+					caster[index] = cy + 1;
+					tier[index] = t;
+				}
 				if (state.getLuminance() > 0) {
 					lights.add(new LightPos(x, cy, z, state.getLuminance()));
 				}
@@ -157,9 +184,9 @@ public final class SunShadowMap {
 					if (state.getLuminance() > 0) {
 						lights.add(new LightPos(x, y, z, state.getLuminance()));
 					}
-					if (tierOf(state) != TIER_OPAQUE) {
+					if (tierOf(state, world, cursor) != TIER_OPAQUE) {
 						BlockState below = world.getBlockState(cursor.set(x, y - 1, z));
-						if (tierOf(below) != TIER_CLEAR) {
+						if (tierOf(below, world, cursor) != TIER_CLEAR) {
 							surfaces[index * MAX_SURFACES + count] = y;
 							count++;
 							if (state.getLuminance() > 0) {
@@ -177,7 +204,7 @@ public final class SunShadowMap {
 		LIGHTS.put(pack(chunkX, chunkZ), lights);
 
 		if (night) {
-			return torchShadows(world, chunkX, chunkZ, surfaces, counts, bottomY, baseX, baseZ);
+			return applyBounce(torchShadows(world, chunkX, chunkZ, surfaces, counts, bottomY, baseX, baseZ));
 		}
 
 		List<ShadowCell> out = new ArrayList<>();
@@ -186,6 +213,8 @@ public final class SunShadowMap {
 			double[] seed = seedFrom(world, chunkX, z, sunEast, slope, viewDistance, bottomY);
 			double runOpaque = seed[0];
 			double runLeaf = seed[1];
+			// Floating casters met so far in this row: {bottom, top, originGx, alpha}.
+			List<double[]> bands = new ArrayList<>();
 
 			// Sweep from the far edge back toward the sun.
 			for (int step = size - 1; step >= 0; step--) {
@@ -200,6 +229,21 @@ public final class SunShadowMap {
 					} else if (runLeaf >= h - 1.0E-6) {
 						alpha = LEAF_ALPHA;
 					}
+					if (alpha == 0) {
+						for (double[] band : bands) {
+							int d = (int) Math.abs(band[2] - gx);
+							if (d == 0) {
+								continue;
+							}
+							// The ray to this cell crosses the caster's band?
+							double low = band[0] - d * slope;
+							double high = band[1] - d * slope;
+							if (h >= low - 1.0E-6 && h < high + 1.0E-6) {
+								alpha = (int) band[3];
+								break;
+							}
+						}
+					}
 					if (alpha > 0) {
 						out.add(new ShadowCell(baseX + gx, h, z, alpha));
 					}
@@ -207,7 +251,10 @@ public final class SunShadowMap {
 
 				int c = caster[index];
 				if (c > bottomY) {
-					if (tier[index] == TIER_LEAF) {
+					if (floating[index]) {
+						bands.add(new double[]{fbottom[index], c, gx,
+								tier[index] == TIER_LEAF ? LEAF_ALPHA : FULL_ALPHA});
+					} else if (tier[index] == TIER_LEAF) {
 						runLeaf = Math.max(runLeaf, c);
 					} else {
 						runOpaque = Math.max(runOpaque, c);
@@ -216,6 +263,41 @@ public final class SunShadowMap {
 				runOpaque -= slope;
 				runLeaf -= slope;
 			}
+		}
+		return applyBounce(out);
+	}
+
+	/**
+	 * Softens shadows toward lit neighbours: bounce light from lit ground
+	 * brightens shadow edges, so enclosed shadow keeps full strength while
+	 * edges fade and lone speckles all but vanish.
+	 */
+	private static List<ShadowCell> applyBounce(List<ShadowCell> cells) {
+		int n = cells.size();
+		if (n < 2) {
+			return cells;
+		}
+		HashMap<Long, Integer> shadowed = new HashMap<>(n * 2);
+		for (int i = 0; i < n; i++) {
+			SunShadowMap.ShadowCell c = cells.get(i);
+			shadowed.put(BlockPos.asLong(c.x(), (int) c.y(), c.z()), i);
+		}
+		List<ShadowCell> out = new ArrayList<>(n);
+		for (SunShadowMap.ShadowCell c : cells) {
+			int lit = 0;
+			for (int dx = -1; dx <= 1; dx++) {
+				for (int dz = -1; dz <= 1; dz++) {
+					if (dx == 0 && dz == 0) {
+						continue;
+					}
+					if (!shadowed.containsKey(BlockPos.asLong(c.x() + dx, (int) c.y(), c.z() + dz))) {
+						lit++;
+					}
+				}
+			}
+			// (lit + 2) / 10: enclosed = 1.0, edge = ~0.6, lone speck = 0.2.
+			int a = (int) (c.a() * (lit + 2) / 10.0);
+			out.add(new ShadowCell(c.x(), c.y(), c.z(), a));
 		}
 		return out;
 	}
@@ -273,7 +355,11 @@ public final class SunShadowMap {
 		return out;
 	}
 
-	/** Marches from a light to a surface point; true if opaque terrain interrupts. */
+	/**
+	 * Marches an exact voxel ray (Amanatides-Woo) from a light to a surface
+	 * point; true if opaque terrain interrupts. Voxel-exact, so rays that graze
+	 * block edges cannot flicker between blocked and clear.
+	 */
 	private static boolean rayBlocked(ClientWorld world, LightPos light,
 			double tx, double ty, double tz, BlockPos.Mutable cursor) {
 		double sx = light.x() + 0.5;
@@ -282,25 +368,51 @@ public final class SunShadowMap {
 		double dx = tx - sx;
 		double dy = ty - sy;
 		double dz = tz - sz;
-		double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-		int steps = Math.max(2, (int) Math.ceil(dist * 2.0));
-		for (int i = 1; i < steps; i++) {
-			double f = i / (double) steps;
-			int bx = (int) Math.floor(sx + dx * f);
-			int by = (int) Math.floor(sy + dy * f);
-			int bz = (int) Math.floor(sz + dz * f);
+		int bx = light.x();
+		int by = light.y();
+		int bz = light.z();
+		int stepX = dx >= 0 ? 1 : -1;
+		int stepY = dy >= 0 ? 1 : -1;
+		int stepZ = dz >= 0 ? 1 : -1;
+		double tDeltaX = dx == 0 ? Double.POSITIVE_INFINITY : Math.abs(1.0 / dx);
+		double tDeltaY = dy == 0 ? Double.POSITIVE_INFINITY : Math.abs(1.0 / dy);
+		double tDeltaZ = dz == 0 ? Double.POSITIVE_INFINITY : Math.abs(1.0 / dz);
+		double tMaxX = dx == 0 ? Double.POSITIVE_INFINITY
+				: (stepX > 0 ? bx + 1 - sx : sx - bx) * tDeltaX;
+		double tMaxY = dy == 0 ? Double.POSITIVE_INFINITY
+				: (stepY > 0 ? by + 1 - sy : sy - by) * tDeltaY;
+		double tMaxZ = dz == 0 ? Double.POSITIVE_INFINITY
+				: (stepZ > 0 ? bz + 1 - sz : sz - bz) * tDeltaZ;
+		while (true) {
+			double t;
+			if (tMaxX <= tMaxY && tMaxX <= tMaxZ) {
+				bx += stepX;
+				t = tMaxX;
+				tMaxX += tDeltaX;
+			} else if (tMaxY <= tMaxZ) {
+				by += stepY;
+				t = tMaxY;
+				tMaxY += tDeltaY;
+			} else {
+				bz += stepZ;
+				t = tMaxZ;
+				tMaxZ += tDeltaZ;
+			}
+			if (t >= 1.0) {
+				return false; // reached the surface point unblocked
+			}
 			if (world.getBlockState(cursor.set(bx, by, bz)).isOpaque()) {
 				return true;
 			}
 		}
-		return false;
 	}
 
 	/**
 	 * Walking toward the sun across loaded chunks, returns the best
 	 * {@code height - distance * slope} found at the edge of this chunk for
 	 * opaque and leaf casters - the running seeds the row sweep continues from.
-	 * Stops at the render distance.
+	 * Stops at the render distance. Floating casters in other chunks are
+	 * skipped: their band shadows only apply within their own chunk.
 	 */
 	private static double[] seedFrom(ClientWorld world, int chunkX, int z, boolean sunEast,
 			double slope, int viewDistance, int bottomY) {
@@ -319,19 +431,22 @@ public final class SunShadowMap {
 			}
 			int top = neighbor.sampleHeightmap(Heightmap.Type.MOTION_BLOCKING, x, z);
 			BlockState state = world.getBlockState(cursor.set(x, top, z));
-			int t = tierOf(state);
+			int t = tierOf(state, world, cursor);
 			while (t == TIER_CLEAR && top > bottomY) {
 				top--;
 				state = world.getBlockState(cursor.set(x, top, z));
-				t = tierOf(state);
+				t = tierOf(state, world, cursor);
 			}
-			double value = top + 1 - k * slope;
-			if (t == TIER_LEAF) {
-				if (value > bestLeaf) {
-					bestLeaf = value;
+			if (t != TIER_CLEAR
+					&& tierOf(world.getBlockState(cursor.set(x, top - 1, z)), world, cursor) == TIER_OPAQUE) {
+				double value = top + 1 - k * slope;
+				if (t == TIER_LEAF) {
+					if (value > bestLeaf) {
+						bestLeaf = value;
+					}
+				} else if (value > bestOpaque) {
+					bestOpaque = value;
 				}
-			} else if (value > bestOpaque) {
-				bestOpaque = value;
 			}
 			if (bestOpaque < bottomY && bestLeaf < bottomY && top <= bottomY) {
 				// The seeds have decayed below the world and no caster is near.
@@ -345,13 +460,20 @@ public final class SunShadowMap {
 		return z >> 4;
 	}
 
-	private static int tierOf(BlockState state) {
+	private static int tierOf(BlockState state, BlockView world, BlockPos pos) {
 		if (state.isOpaque()) {
 			return TIER_OPAQUE;
 		}
 		if (state.getBlock() instanceof LeavesBlock) {
 			return TIER_LEAF;
 		}
-		return TIER_CLEAR;
+		if (state.getBlock() instanceof TransparentBlock || state.getBlock() instanceof PaneBlock) {
+			return TIER_CLEAR;
+		}
+		// Slabs, stairs, fences, walls and friends block light like full cubes.
+		if (!state.getCollisionShape(world, pos).isEmpty()) {
+			return TIER_OPAQUE;
+		}
+		return TIER_CLEAR; // buttons, rails, plants, carpets - no shadow
 	}
 }
