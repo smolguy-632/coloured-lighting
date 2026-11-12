@@ -1,3 +1,4 @@
+# old and most of it not true
 # Coloured lighting: sun shadows
 
 Blocks cast blocky sun shadows on the ground and on other surfaces. Shadow
