@@ -1,6 +1,9 @@
 package com.realdiplad.colouredlighting.client.shadow;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Deque;
 import java.util.List;
 
 import net.minecraft.block.BlockState;
@@ -26,6 +29,9 @@ public final class SunShadowMap {
 	static final double STEP = 0.25;
 	/** Upper bound on ray steps per surface, so low-sun rays stay cheap. */
 	static final int MAX_STEPS = 160;
+
+	/** 4-way neighborhood offsets for region flood-fill. */
+	private static final int[][] NEIGHBORS = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 
 	/** A single shadowed surface cell. x and z are block coords, y is the surface height. */
 	public record ShadowCell(int x, double y, int z) {
@@ -66,14 +72,21 @@ public final class SunShadowMap {
 		int pz = (int) Math.floor(origin.z);
 
 		BlockPos.Mutable pos = new BlockPos.Mutable();
-		List<ShadowCell> out = new ArrayList<>();
+		int size = RADIUS * 2 + 1;
+		boolean[] shadowed = new boolean[size * size];
+		int[] surfaces = new int[size * size];
+		Arrays.fill(surfaces, Integer.MIN_VALUE);
 
-		for (int x = px - RADIUS; x <= px + RADIUS; x++) {
-			for (int z = pz - RADIUS; z <= pz + RADIUS; z++) {
+		for (int gx = 0; gx < size; gx++) {
+			int x = px - RADIUS + gx;
+			for (int gz = 0; gz < size; gz++) {
+				int z = pz - RADIUS + gz;
 				int surfaceY = findSurface(world, pos, x, py, z);
 				if (surfaceY == Integer.MIN_VALUE) {
 					continue;
 				}
+				int index = gx * size + gz;
+				surfaces[index] = surfaceY;
 
 				// Surface point is the top face of the block at surfaceY.
 				double sx = x + 0.5;
@@ -81,12 +94,85 @@ public final class SunShadowMap {
 				double sz = z + 0.5;
 
 				if (isShadowed(world, pos, sx, sy, sz, towardSunX, towardSunY)) {
-					out.add(new ShadowCell(x, sy, z));
+					shadowed[index] = true;
 				}
 			}
 		}
 
-		cells = out;
+		cells = collectAnchored(px - RADIUS, pz - RADIUS, size, shadowed, surfaces);
+	}
+
+	/**
+	 * Keeps only shadow cells that belong to a region anchored to a caster.
+	 *
+	 * A region is anchored when it touches a neighboring column that rises above
+	 * the shadowed surface - the base of whatever block casts the shadow. This
+	 * drops orphan patches thrown by elevated blocks (say a lone lintel), which
+	 * otherwise read as a random floating square on the ground.
+	 */
+	private static List<ShadowCell> collectAnchored(int minX, int minZ, int size,
+			boolean[] shadowed, int[] surfaces) {
+		int total = size * size;
+		boolean[] keep = new boolean[total];
+		Deque<Integer> queue = new ArrayDeque<>();
+
+		for (int index = 0; index < total; index++) {
+			if (!shadowed[index] || keep[index]) {
+				continue;
+			}
+			if (hasTallerNeighbor(index, size, surfaces)) {
+				// Found an anchored region: flood-fill it from here.
+				keep[index] = true;
+				queue.add(index);
+				while (!queue.isEmpty()) {
+					int current = queue.remove();
+					int cx = current / size;
+					int cz = current % size;
+					for (int[] offset : NEIGHBORS) {
+						int nx = cx + offset[0];
+						int nz = cz + offset[1];
+						if (nx < 0 || nx >= size || nz < 0 || nz >= size) {
+							continue;
+						}
+						int neighbor = nx * size + nz;
+						if (shadowed[neighbor] && !keep[neighbor]) {
+							keep[neighbor] = true;
+							queue.add(neighbor);
+						}
+					}
+				}
+			}
+		}
+
+		List<ShadowCell> out = new ArrayList<>();
+		for (int gx = 0; gx < size; gx++) {
+			for (int gz = 0; gz < size; gz++) {
+				int index = gx * size + gz;
+				if (keep[index]) {
+					out.add(new ShadowCell(minX + gx, surfaces[index] + 1.0, minZ + gz));
+				}
+			}
+		}
+		return out;
+	}
+
+	/** True when any 4-adjacent column's surface rises above this cell's surface. */
+	private static boolean hasTallerNeighbor(int index, int size, int[] surfaces) {
+		int cx = index / size;
+		int cz = index % size;
+		int surfaceY = surfaces[index];
+		for (int[] offset : NEIGHBORS) {
+			int nx = cx + offset[0];
+			int nz = cz + offset[1];
+			if (nx < 0 || nx >= size || nz < 0 || nz >= size) {
+				continue;
+			}
+			int neighbor = nx * size + nz;
+			if (surfaces[neighbor] > surfaceY) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** Scans down from above the player for a solid block with air above it. */
