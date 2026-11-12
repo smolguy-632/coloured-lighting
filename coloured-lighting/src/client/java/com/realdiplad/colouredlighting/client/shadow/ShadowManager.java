@@ -87,15 +87,13 @@ public final class ShadowManager {
 		float skyAngle = world.getSkyAngle(1.0F);
 		int bucket = currentBucket(skyAngle);
 
-		if (ShadowLengthTable.lengthFor(skyAngle) == 0) {
-			// Night: nothing casts a shadow.
-			setAllEmpty(bucket);
-			return;
-		}
-
 		double angle = skyAngle * Math.PI * 2.0;
-		double towardSunX = -Math.sin(angle);
-		double towardSunY = Math.cos(angle);
+		double sunHeight = Math.cos(angle);
+		double sunAcross = Math.sin(angle);
+		// Night: the moon mirrors the sun, so shadows continue faintly.
+		boolean night = sunHeight < 0.05;
+		double towardX = night ? sunAcross : -sunAcross;
+		double towardY = night ? -sunHeight : sunHeight;
 
 		int budget = BUDGET_PER_TICK;
 		boolean changed = false;
@@ -107,7 +105,7 @@ public final class ShadowManager {
 			}
 			Entry entry = e.getValue();
 			if (entry.dirty) {
-				rebuild(world, entry, e.getKey(), viewDistance, bucket, towardSunX, towardSunY);
+				rebuild(world, entry, e.getKey(), viewDistance, bucket, towardX, towardY, night);
 				budget--;
 				changed = true;
 			}
@@ -121,7 +119,7 @@ public final class ShadowManager {
 				}
 				Entry entry = e.getValue();
 				if (entry.bucket != bucket) {
-					rebuild(world, entry, e.getKey(), viewDistance, bucket, towardSunX, towardSunY);
+					rebuild(world, entry, e.getKey(), viewDistance, bucket, towardX, towardY, night);
 					budget--;
 					changed = true;
 				}
@@ -134,27 +132,12 @@ public final class ShadowManager {
 	}
 
 	private void rebuild(ClientWorld world, Entry entry, long key, int viewDistance, int bucket,
-			double towardSunX, double towardSunY) {
+			double towardX, double towardY, boolean night) {
 		int chunkX = (int) (key >> 32);
 		int chunkZ = (int) (key & 0xFFFFFFFFL);
-		entry.cells = SunShadowMap.computeChunk(world, chunkX, chunkZ, towardSunX, towardSunY, viewDistance);
+		entry.cells = SunShadowMap.computeChunk(world, chunkX, chunkZ, towardX, towardY, viewDistance, night);
 		entry.bucket = bucket;
 		entry.dirty = false;
-	}
-
-	private void setAllEmpty(int bucket) {
-		boolean changed = false;
-		for (Entry entry : chunks.values()) {
-			if (!entry.cells.isEmpty()) {
-				entry.cells = List.of();
-				changed = true;
-			}
-			entry.bucket = bucket;
-			entry.dirty = false;
-		}
-		if (changed) {
-			refreshRenderList();
-		}
 	}
 
 	private void refreshRenderList() {

@@ -23,8 +23,6 @@ import net.minecraft.util.math.Vec3d;
 public final class ShadowRenderer {
 	/** Lifts quads slightly off the surface to avoid z-fighting. */
 	private static final double LIFT = 0.002;
-	/** Shadow darkness, 0 to 255. */
-	private static final int ALPHA = 110;
 
 	private ShadowRenderer() {
 	}
@@ -56,11 +54,12 @@ public final class ShadowRenderer {
 			float z0 = cell.z();
 			float z1 = cell.z() + 1.0F;
 			float y = (float) (cell.y() + LIFT);
+			int a = cell.a();
 
-			buffer.vertex(matrix, x0, y, z0).color(0, 0, 0, ALPHA).next();
-			buffer.vertex(matrix, x0, y, z1).color(0, 0, 0, ALPHA).next();
-			buffer.vertex(matrix, x1, y, z1).color(0, 0, 0, ALPHA).next();
-			buffer.vertex(matrix, x1, y, z0).color(0, 0, 0, ALPHA).next();
+			buffer.vertex(matrix, x0, y, z0).color(0, 0, 0, a).next();
+			buffer.vertex(matrix, x0, y, z1).color(0, 0, 0, a).next();
+			buffer.vertex(matrix, x1, y, z1).color(0, 0, 0, a).next();
+			buffer.vertex(matrix, x1, y, z0).color(0, 0, 0, a).next();
 		}
 
 		BufferRenderer.drawWithGlobalProgram(buffer.end());
