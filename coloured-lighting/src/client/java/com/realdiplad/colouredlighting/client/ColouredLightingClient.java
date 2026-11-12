@@ -34,7 +34,7 @@ public class ColouredLightingClient implements ClientModInitializer {
 			}
 
 			if (enabled) {
-				shadows.tick(client.world, client.player.getBlockY());
+				shadows.tick(client.world, client.options.getViewDistance().getValue());
 			}
 		});
 

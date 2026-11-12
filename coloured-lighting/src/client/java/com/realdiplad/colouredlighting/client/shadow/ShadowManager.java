@@ -6,7 +6,6 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 import net.minecraft.client.world.ClientWorld;
-import net.minecraft.util.math.BlockPos;
 
 /**
  * Caches per-chunk shadow cells and decides when to recompute them.
@@ -16,9 +15,7 @@ import net.minecraft.util.math.BlockPos;
  *   <li>its render mesh is scheduled for an update (block edits, light
  *       changes) - detected by {@code WorldRendererMixin};</li>
  *   <li>the quantized sun-angle bucket advances - the same ticks on which
- *       vanilla refreshes sky light across all chunks; or</li>
- *   <li>the player moves vertically far enough to change which surfaces the
- *       scan looks at.</li>
+ *       vanilla refreshes sky light across all chunks.</li>
  * </ul>
  * A small per-tick budget keeps the cost spread out; remeshed chunks are
  * serviced first so block edits feel instant.
@@ -36,12 +33,10 @@ public final class ShadowManager {
 	private static final class Entry {
 		volatile List<SunShadowMap.ShadowCell> cells = List.of();
 		volatile int bucket = Integer.MIN_VALUE;
-		volatile int py = Integer.MIN_VALUE;
 		volatile boolean dirty = true;
 	}
 
 	private final Map<Long, Entry> chunks = new ConcurrentHashMap<>();
-	private final BlockPos.Mutable scratch = new BlockPos.Mutable();
 	private volatile List<SunShadowMap.ShadowCell> renderCells = List.of();
 
 	private ShadowManager() {
@@ -83,7 +78,7 @@ public final class ShadowManager {
 	}
 
 	/** Runs each client tick: rebuilds up to {@link #BUDGET_PER_TICK} stale chunks. */
-	public void tick(ClientWorld world, int py) {
+	public void tick(ClientWorld world, int viewDistance) {
 		if (!world.getDimension().hasSkyLight()) {
 			clear();
 			return;
@@ -112,21 +107,21 @@ public final class ShadowManager {
 			}
 			Entry entry = e.getValue();
 			if (entry.dirty) {
-				rebuild(world, entry, e.getKey(), py, bucket, towardSunX, towardSunY);
+				rebuild(world, entry, e.getKey(), viewDistance, bucket, towardSunX, towardSunY);
 				budget--;
 				changed = true;
 			}
 		}
 
-		// Pass 2: everything else that drifted (new sun bucket, player height).
+		// Pass 2: everything else whose sun bucket drifted.
 		if (budget > 0) {
 			for (Map.Entry<Long, Entry> e : chunks.entrySet()) {
 				if (budget <= 0) {
 					break;
 				}
 				Entry entry = e.getValue();
-				if (entry.bucket != bucket || Math.abs(entry.py - py) > SunShadowMap.PY_MARGIN) {
-					rebuild(world, entry, e.getKey(), py, bucket, towardSunX, towardSunY);
+				if (entry.bucket != bucket) {
+					rebuild(world, entry, e.getKey(), viewDistance, bucket, towardSunX, towardSunY);
 					budget--;
 					changed = true;
 				}
@@ -138,13 +133,12 @@ public final class ShadowManager {
 		}
 	}
 
-	private void rebuild(ClientWorld world, Entry entry, long key, int py, int bucket,
+	private void rebuild(ClientWorld world, Entry entry, long key, int viewDistance, int bucket,
 			double towardSunX, double towardSunY) {
 		int chunkX = (int) (key >> 32);
 		int chunkZ = (int) (key & 0xFFFFFFFFL);
-		entry.cells = SunShadowMap.computeChunk(world, scratch, chunkX, chunkZ, py, towardSunX, towardSunY);
+		entry.cells = SunShadowMap.computeChunk(world, chunkX, chunkZ, towardSunX, towardSunY, viewDistance);
 		entry.bucket = bucket;
-		entry.py = py;
 		entry.dirty = false;
 	}
 
