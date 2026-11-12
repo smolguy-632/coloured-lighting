@@ -1,0 +1,41 @@
+{
+	"schemaVersion": 1,
+	"id": "coloured-lighting",
+	"version": "${version}",
+	"name": "Coloured lighting",
+	"description": "Voxel sun shadows drawn as an overlay. Blocks cast blocky shadows that shrink and stretch with the time of day. Works alongside Sodium.",
+	"authors": [
+		"Me!"
+	],
+	"contact": {
+		"homepage": "https://fabricmc.net/",
+		"sources": "https://github.com/FabricMC/fabric-example-mod"
+	},
+	"license": "CC0-1.0",
+	"icon": "assets/coloured-lighting/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"com.realdiplad.colouredlighting.ColouredLighting"
+		],
+		"client": [
+			"com.realdiplad.colouredlighting.client.ColouredLightingClient"
+		]
+	},
+	"mixins": [
+		"coloured-lighting.mixins.json",
+		{
+			"config": "coloured-lighting.client.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~1.20.1",
+		"java": ">=17",
+		"fabric-api": "*"
+	},
+	"suggests": {
+		"sodium": "*"
+	}
+}
