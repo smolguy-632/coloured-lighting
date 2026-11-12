@@ -3,26 +3,23 @@ package com.realdiplad.colouredlighting.client;
 import org.lwjgl.glfw.GLFW;
 
 import net.fabricmc.api.ClientModInitializer;
+import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientChunkEvents;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 
+import com.realdiplad.colouredlighting.client.shadow.ShadowManager;
 import com.realdiplad.colouredlighting.client.shadow.ShadowRenderer;
-import com.realdiplad.colouredlighting.client.shadow.SunShadowMap;
 
 public class ColouredLightingClient implements ClientModInitializer {
-	/** Shadows are recalculated every 100 ticks (5 seconds), not every frame. */
-	private static final int REFRESH_TICKS = 100;
-
 	private static final KeyBinding TOGGLE_KEY = KeyBindingHelper.registerKeyBinding(
 			new KeyBinding("key.coloured-lighting.toggle", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_O, "category.coloured-lighting"));
 
 	private static boolean enabled = true;
-	private static int tickCounter = 0;
 
-	private final SunShadowMap shadows = new SunShadowMap();
+	private final ShadowManager shadows = ShadowManager.get();
 
 	@Override
 	public void onInitializeClient() {
@@ -36,11 +33,15 @@ public class ColouredLightingClient implements ClientModInitializer {
 				return;
 			}
 
-			if (enabled && tickCounter % REFRESH_TICKS == 0) {
-				shadows.rebuild(client.world, client.player.getPos());
+			if (enabled) {
+				shadows.tick(client.world, client.player.getBlockY());
 			}
-			tickCounter++;
 		});
+
+		ClientChunkEvents.CHUNK_LOAD.register((world, chunk) ->
+				shadows.onChunkLoad(chunk.getPos().x, chunk.getPos().z));
+		ClientChunkEvents.CHUNK_UNLOAD.register((world, chunk) ->
+				shadows.onChunkUnload(chunk.getPos().x, chunk.getPos().z));
 
 		WorldRenderEvents.AFTER_ENTITIES.register(context -> {
 			if (enabled) {

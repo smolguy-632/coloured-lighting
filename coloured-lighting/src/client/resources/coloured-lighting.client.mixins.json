@@ -2,7 +2,7 @@
 	"required": true,
 	"package": "com.realdiplad.colouredlighting.client.mixin",
 	"compatibilityLevel": "JAVA_17",
-	"client": [],
+	"client": ["WorldRendererMixin"],
 	"injectors": {
 		"defaultRequire": 1
 	}
